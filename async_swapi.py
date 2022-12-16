@@ -1,78 +1,70 @@
+import time
 import asyncio
-import datetime
 from aiohttp import ClientSession
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, JSON
 from more_itertools import chunked
+from db import engine, Session, People, Base, FIELDS
+
+URL = 'https://swapi.dev/api/people/'
+CHUNK_SIZE = 15
 
 
-PG_DSN = 'postgresql+asyncpg://app:secret@127.0.0.1:5431/app'
-engine = create_async_engine(PG_DSN)
-Base = declarative_base()
-Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+async def get_person(person_id: int):
+    """ Получаем данные по запросу """
+    print(f'{person_id:>2} - start request GET')
+    session = ClientSession()
+    response = await session.get(f'{URL}{person_id}')
+    person = await response.json()
+    print(f'__{person_id:>2} - response.json')
+    await session.close()
+    return person
 
 
-class People(Base):
-    __tablename__ = 'people'
-
-    id = Column(Integer, primary_key=True)
-    json = Column(JSON)
-
-
-CHUNK_SIZE = 10
-
-
-async def chunked_async(async_iter, size):
-
-    buffer = []
-    while True:
-        try:
-            item = await async_iter.__anext__()
-        except StopAsyncIteration:
-            break
-        buffer.append(item)
-        if len(buffer) == size:
-            yield buffer
-            buffer = []
+async def get_fields(person_id: int, person: dict):
+    """ Формируем поля для базы данных """
+    if len(person) == 1:
+        print(f'<person (id={person_id:>2}) not found>')
+        return None
+    person_db = {}
+    for field, value in person.items():
+        if value and field in FIELDS:
+            if isinstance(value, list):
+                person_db[field] = ', '.join(value)
+            else:
+                person_db[field] = value
+    person_db['id'] = person_id
+    print(f'___{person_id:>2} - fields for the database are ready')
+    return person_db
 
 
-async def get_person(people_id: int, session: ClientSession):
-    print(f'begin {people_id}')
-    async with session.get(f'https://swapi.dev/api/people/{people_id}') as response:
-        json_data = await response.json()
-    print(f'end {people_id}')
-    return json_data
-
-
-async def get_people():
-    async with ClientSession() as session:
-        for chunk in chunked(range(1, 80), CHUNK_SIZE):
-            coroutines = [get_person(people_id=i, session=session) for i in chunk]
-            results = await asyncio.gather(*coroutines)
-            for item in results:
-                yield item
-
-
-async def insert_people(people_chunk):
+async def paste_person(person_db: dict):
+    """ Вставляем данные в базу данных """
     async with Session() as session:
-        session.add_all([People(json=item) for item in people_chunk])
+        people_orm = People(**person_db)
+        session.add(people_orm)
         await session.commit()
+        print(f'____{person_db["id"]:>2} - added to the database')
 
 
-async def main():
+async def chain(person_id: int):
+    """ Запускаем по цепочке функции (каждая последующая зависит от результата предыдущей) """
+    person = await get_person(person_id)
+    person_db = await get_fields(person_id, person)
+    if not person_db:
+        return 'Not found'
+    await paste_person(person_db)
+
+
+async def main(start: int, end: int):
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
         await conn.commit()
+    for id_chunk in chunked(range(start, end), CHUNK_SIZE):
+        coroutines = [chain(i) for i in id_chunk]
+        await asyncio.gather(*coroutines)
 
-    async for chunk in chunked_async(get_people(), CHUNK_SIZE):
-        asyncio.create_task(insert_people(chunk))
 
-    tasks = set(asyncio.all_tasks()) - {asyncio.current_task()}
-    for task in tasks:
-        await task
-
-start = datetime.datetime.now()
-asyncio.run(main())
-print(datetime.datetime.now() - start)
+if __name__ == '__main__':
+    start_time = time.time()
+    asyncio.run(main(1, 85))
+    print(f'TIME: {round(time.time() - start_time, 2)} s')
