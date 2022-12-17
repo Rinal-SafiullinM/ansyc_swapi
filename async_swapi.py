@@ -45,9 +45,48 @@ async def paste_person(person_db: dict):
         print(f'____{person_db["id"]:>2} - added to the database')
 
 
-async def chain(person_id: int):
+async def get_extra_fields(url_list, session):
+    name_list = []
+    for url in url_list:
+        async with session.get(url) as response:
+            json_res = await response.json()
+            name_list.append(json_res['name'])
+    return ', '.join(name_list)
+
+
+async def get_films(url_list, session):
+    name_list = []
+    for url in url_list:
+        async with session.get(url) as response:
+            json_res = await response.json()
+            name_list.append(json_res['title'])
+    return ', '.join(name_list)
+
+
+async def chain(person_id: int, session: ClientSession):
     """ Запускаем по цепочке функции (каждая последующая зависит от результата предыдущей) """
     person = await get_person(person_id)
+    if person.get('detail', False):
+        return {'id': person_id,
+                'name': 'n/a',
+                'birth_year': 'n/a',
+                'gender': 'n/a',
+                'height': 'n/a',
+                'mass': 'n/a',
+                'eye_color': 'n/a',
+                'hair_color': 'n/a',
+                'skin_color': 'n/a',
+                'films': 'n/a',
+                'homeworld': 'n/a',
+                'species': 'n/a',
+                'starships': 'n/a',
+                'vehicles': 'n/a',
+                }
+    person['films'] = await get_films(person['films'], session)
+    person['homeworld'] = await get_extra_fields(person['homeworld'], session)
+    person['species'] = await get_extra_fields(person['species'], session)
+    person['starships'] = await get_extra_fields(person['starships'], session)
+    person['vehicles'] = await get_extra_fields(person['vehicles'], session)
     person_db = await get_fields(person_id, person)
     if not person_db:
         return 'Not found'
@@ -59,9 +98,10 @@ async def main(start: int, end: int):
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
         await conn.commit()
-    for id_chunk in chunked(range(start, end), CHUNK_SIZE):
-        coroutines = [chain(i) for i in id_chunk]
-        await asyncio.gather(*coroutines)
+    async with ClientSession() as session:
+        for id_chunk in chunked(range(start, end), CHUNK_SIZE):
+            coroutines = [chain(i, session=session) for i in id_chunk]
+            await asyncio.gather(*coroutines)
 
 
 if __name__ == '__main__':
